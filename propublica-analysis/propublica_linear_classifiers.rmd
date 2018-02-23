@@ -1,0 +1,616 @@
+# Reliance of criminal recidivism prediction models on race and sex
+
+### Process data
+
+* Open dataset, 
+* identify data subset (`S_ind`), 
+* create features, and
+* identify sets of variables for which to study reliance (`p1_sets`)
+
+```{r process_data}
+rm(list=ls())
+library(dplyr)
+
+dat <- read.csv('compas-scores-two-years.csv') %>%
+        filter(days_b_screening_arrest <= 30) %>%
+        filter(days_b_screening_arrest >= -30) %>%
+        filter(is_recid != -1) %>%
+        filter(c_charge_degree != "O") %>%
+        filter(score_text != 'N/A')
+    #filters as suggested for removing poor quality measurements, see below
+        # https://github.com/propublica/compas-analysis/blob/master/Compas%20Analysis.ipynb
+dim(dat)
+
+dat$sex_Male <- dat$sex == 'Male'
+dat$c_charge_degree_F <- dat$c_charge_degree == 'F'
+
+
+
+
+
+colnames(dat)
+apply(dat,2,function(x) mean(is.na(x)))
+
+set.seed(0)
+S_ind <- (1: nrow(dat)) %in% sample(nrow(dat),1000, replace=FALSE)
+saveRDS(S_ind,'R_output_files/S_ind.rds')
+# head(dat[S_ind,])
+
+#Preprocessing
+library(dplyr)
+race_l <- levels(dat$race)
+
+# convert race category to indicator matrix
+race_db <- data.frame(intercept=rep(1,dim(dat)[1]))
+if(sum(dat$race=='Caucasian')==0) stop('Missing intercept / reference group')
+for(j in 1:length(race_l)){
+	if(all( dat$race != race_l[j] )) next
+	if( 'Caucasian' == race_l[j] ) next #Caucasian is intercept / reference group
+	race_db[paste0('race_',race_l[j])] <- (dat$race == race_l[j])+0
+}
+
+
+
+
+#### age splines
+knot_points <- c(0, 20, 25, 30, 40)
+age_sd <- sd(dat$age)
+saveRDS(list(age_sd=age_sd, knot_points=knot_points),'R_output_files/age_info.rds')
+age_scaled <- dat$age/age_sd
+knots_scaled <- knot_points/age_sd
+age_splines <- matrix(NA, dim(dat)[1], length(knot_points))
+colnames(age_splines) <- paste0('age_over_',knot_points)
+for(j in 1:length(knot_points)){
+	age_splines[,j] <- age_scaled - knots_scaled[j]
+}
+age_splines <- age_splines * (age_splines>0)
+#### 
+
+
+covariate_subset <- c('sex_Male','priors_count','c_charge_degree_F')
+	# age is added separately
+outcomes_lab <- c('two_year_recid')
+
+
+# db = combined processed covariate set we'll be using
+db <- cbind(race_db, dat[,covariate_subset], age_splines) %>%
+	lapply(., as.numeric) %>%
+	as.data.frame() %>% as.matrix()
+
+any(is.na(db))
+
+# our hinge loss optimization functions assume that the data do not have an intercept column, so we will omit the intercept.
+db <- db[,!colnames(db)%in%c('intercept')]
+
+# Scale variables for priors based on their mean & sd in S_ind.	
+diag(var(db[S_ind,]))
+scale_variables <- c('priors_count')
+db[,scale_variables] <- db[,scale_variables] - 
+	rep(1,length(S_ind)) %*% t(colMeans(as.matrix(db[S_ind,scale_variables])))
+db[,scale_variables] <- db[,scale_variables] / 
+	rep(1,length(S_ind)) %*% t(apply(as.matrix(db[S_ind,scale_variables]),2,sd))
+apply(db,2,range)
+diag(var(db[S_ind,]))
+round(colMeans(db[S_ind,]), 6)
+
+
+saveRDS(db,'R_output_files/processed_features_full.rds')
+saveRDS(dat[,outcomes_lab],'R_output_files/processed_outcomes_full.rds')
+
+
+#Sets of variables for which to consider model reliance
+admissable <- c('priors_count', 'c_charge_degree_F', colnames(age_splines))
+p1_names <- list(
+	'admissable'=admissable,
+	'inadmissable'=setdiff(colnames(db),admissable)
+	)
+(  p1_sets <- lapply(p1_names, function(z) which(colnames(db)%in%z))  )##numeric indeces
+lapply(p1_sets, function(z) colnames(db)[z]) #show variable subsets
+saveRDS(p1_sets,'R_output_files/p1_sets.rds')
+
+save.image('R_output_files/all_output_process.rdata')
+
+
+
+
+```
+
+
+
+### Train 
+
+Train on a data subset to obtain a regularization threshold, a reference model, and models to use in AR. Also train imputation models.
+
+
+```{r train, dev='pdf'}
+
+
+set.seed(0)
+
+rm(list=ls())
+library(dplyr)
+library(pbapply)
+S_ind <- readRDS('R_output_files/S_ind.rds')
+X <- readRDS('R_output_files/processed_features_full.rds')[S_ind,]
+outcomes <- readRDS('R_output_files/processed_outcomes_full.rds')[S_ind]
+colnames(X)
+N<-dim(X)[1]
+
+y <- as.numeric(outcomes)
+y[y==0] <- -1 # for hinge loss
+if(any(!unique(y) %in% c(-1,1))) stop('processing error')
+
+if(N!=1000 | length(y)!=1000) stop('error in sampling') #redundant workcheck
+sparse_category_flag <- colSums(X)<5 & apply(X,2,function(z)length(unique(z))<=2)
+if(any(sparse_category_flag)) warning('Some indicators are sparse.\n',
+	paste(paste(
+		colnames(X)[sparse_category_flag],colSums(as.matrix(X[,sparse_category_flag])),
+	sep=': '),collapse='\n'))
+
+
+p <- dim(X)[2]
+
+colMeans(X)
+diag(var(X))
+apply(X,2,range)
+
+script_folder <- '../general-scripts/'
+source(paste0(script_folder,'binary_search_mcr.r'))
+source(paste0(script_folder,'hinge_mcr.r'))
+
+
+
+
+
+#   _______      __
+#  / ____\ \    / /
+# | |     \ \  / /
+# | |      \ \/ /
+# | |____   \  /
+#  \_____|   \/
+#
+#   Cross-validate
+
+
+
+
+system.time({
+	w_unrestricted_best <- 	optimize_hinge_general(method='grad-based', y=y, X=X, reg_threshold=Inf, extra_step_NM= TRUE)
+})
+round(w_unrestricted_best,2)
+
+
+J <- 35
+w_start_cv <- rep(0,p+1) #do not use w_unrestricted_best as starting point because this is informed by out-of-fold data.
+(reg_unlim <- c(crossprod(w_unrestricted_best[-1])))
+reg_seq <- reg_unlim * (2^c(0,seq(-3,0.4,length=J-1)))
+reg_seq <- reg_seq[order(reg_seq)]
+cv_report <- t(pbsapply(reg_seq,function(rr){
+	CV_mod(y=y,X=X,n_folds=50,
+	fit_fun = function(y,X){optimize_hinge_general(y=y, X=X, reg_threshold=rr, start=w_start_cv, method='grad-based',
+		sparse_warning=FALSE, 
+		extra_step_NM = TRUE,
+		long_cg_lim =500,
+		maxit_SA=100
+		)},
+	report_fun = function(y,X,mod){
+		c('err'=mean(hinge_w(y=y,X=X,w=mod)),
+		  'reg'=crossprod(mod[-1]))
+	}, fit_in_sample=TRUE)
+}))
+saveRDS(list(cv_report=cv_report, reg_seq=reg_seq),'R_output_files/cv_output.rds')
+(reg_threshold <- reg_seq[which(cv_report[,'cv.err'] == min(cv_report[,'cv.err']))][1])
+
+plot(reg_seq,cv_report[,'cv.err'],type='o',col='orange',lwd=2,
+	ylim=range(cv_report[,c('cv.err','in_sample.err')]),
+	ylab='Loss', xlab='regularization threshold',
+	main='Cross-validation on data subset S')
+lines(reg_seq,cv_report[,'in_sample.err'],type='o',col='darkgreen',lwd=2)
+abline(h=min(cv_report[,'cv.err']), lty=3)
+abline(v=reg_threshold,lty=2)
+legend('topright', pch=1, lwd=2, 
+	   c('training loss','CV loss'),
+	col=c('darkgreen','orange'))
+
+system.time({
+	w_S <- 	optimize_hinge_general(y=y, X=X, reg_threshold=reg_threshold, method='grad-based',extra_step_NM=TRUE)
+})
+
+
+saveRDS(w_S,'R_output_files/svm_S_subset.rds')
+saveRDS(min(cv_report[,'cv.err']),'R_output_files/w_cv_err.rds')
+
+p1_sets <- readRDS('R_output_files/p1_sets.rds')
+w_ar <- lapply(p1_sets, function(p1) {
+	optimize_hinge_general(y=y, X=X[,-p1], reg_threshold=reg_threshold, method='grad-based',extra_step_NM=TRUE)
+})
+saveRDS(w_ar,'R_output_files/svm_S_AR.rds')
+
+
+#  _                       _
+# (_)                     | |
+#  _ _ __ ___  _ __  _   _| |_ ___
+# | | '_ ` _ \| '_ \| | | | __/ _ \
+# | | | | | | | |_) | |_| | ||  __/
+# |_|_| |_| |_| .__/ \__,_|\__\___|
+#             | |
+#             |_|
+
+library(nnet)
+# determine a list of coefficient matrices for models that 
+# impute covariates as functions of each other.
+g_impute_coeffs <- lapply(p1_sets, function(p1){
+
+	p_output <- length(p1)
+	not_p1 <- setdiff(1:p, p1)
+	p_input <- length(not_p1)
+	names_p1 <- colnames(X)[p1]
+
+	coef_mat <- matrix(NA,p_output, p_input+1)
+	colnames(coef_mat) <- c('intercept',colnames(X)[not_p1])
+	rownames(coef_mat) <- colnames(X)[p1]
+
+
+	#separately impute categorical variables
+	race_ind <- grepl('race',names_p1)
+	sex_ind <- grepl('sex',names_p1)
+	felony_ind <- grepl('c_charge_degree_F',names_p1)
+	age_spline_ind <- grepl('age_over',names_p1) & (names_p1 != 'age_over_0') #treat age_over_0 as a regular continuous variable; don't impute spline terms.
+	continuous_ind <- !(race_ind | sex_ind | felony_ind | age_spline_ind)
+
+	if(any(continuous_ind)){
+		# simple linear models to impute each continuous covariate
+		for(j in 1:sum(continuous_ind)){
+			wj <- which(continuous_ind)[j]
+			coef_mat[wj,] <- lm(
+				X[,p1[wj]] ~ X[,not_p1]
+				)$coefficients
+		}
+	}
+
+	if(any(race_ind)){
+		#convert to factor
+		race_factor <- apply(X[,p1[race_ind]], 1, function(cc){
+			if(all(cc==0)) return('race_Caucasian')
+			names(which(cc==1))
+		}) %>% unlist %>% as.factor %>% relevel(ref='race_Caucasian')
+
+		race_model <- multinom(
+				y ~ . , data=data.frame('y'=race_factor,X[,not_p1])
+			)
+		race_coef <- summary(race_model)$coefficients
+		for(j in 1:dim(race_coef)[1]){
+			nj <- rownames(race_coef)[j]
+			coef_mat[nj,] <- race_coef[nj,]
+		}
+		### Converting back from multinomial probabilities
+		# race_pred_fun <- function(xx){
+		# 	predict(race_model,
+		# 		newdata=data.frame('(Intercept)'=1,t(xx))
+		# 		,'probs')
+		# }
+		# rr1 <- race_coef%*%c(1,X[1,not_p1])
+		# pred_ref <- 1/sum(c(1,exp(rr1)))
+		# c(pred_ref, pred_ref * exp(rr1)) ==race_pred_fun(c(1,X[1,not_p1]))
+	}
+
+	if(any(sex_ind)){
+		sex_model <- glm(
+				y ~ . , data=data.frame(
+					'y'=as.factor(X[,p1[sex_ind]]),
+					X[,not_p1]
+				), family='binomial'
+			)
+		coef_mat[sex_ind,] <- sex_model$coefficients
+	}
+
+	if(any(felony_ind)){
+		felony_model <- glm(
+				y ~ . , data=data.frame(
+					'y'=as.factor(X[,p1[felony_ind]]),
+					X[,not_p1]
+				), family='binomial'
+			)
+		coef_mat[felony_ind,] <- felony_model$coefficients
+	}
+
+	coef_mat
+
+})
+g_impute_coeffs
+saveRDS(g_impute_coeffs, 'R_output_files/impute_coeffs.rds')
+
+save.image('R_output_files/all_output_training.rdata')
+
+
+```
+
+
+
+
+### MCR
+
+Get MR, AR & MCR on held-out data
+
+
+
+```{r mcr}
+rm(list=ls())
+library(dplyr)
+library(pbapply)
+S_ind <- readRDS('R_output_files/S_ind.rds')
+X <- readRDS('R_output_files/processed_features_full.rds')[!S_ind,]
+outcomes <- readRDS('R_output_files/processed_outcomes_full.rds')[!S_ind]
+colnames(X)
+N<-dim(X)[1]
+
+y <- as.numeric(outcomes)
+y[y==0] <- -1
+if(any(!unique(y) %in% c(-1,1))) stop('processing error')
+p <- dim(X)[2]
+
+if(N!=5172 | length(y)!=5172) stop('error in sampling')
+
+
+# Running locally or on cluster
+script_folder <- '../general-scripts/'
+source(paste0(script_folder,'binary_search_mcr.r'))
+source(paste0(script_folder,'hinge_mcr.r'))
+
+
+#  __  __    _____   _____
+# |  \/  |  / ____| |  __ \
+# | \  / | | |      | |__) |
+# | |\/| | | |      |  _  /
+# | |  | | | |____  | | \ \
+# |_|  |_|  \_____| |_|  \_\
+#
+# Model class reliance
+
+
+eps_multiplier <- 0.05
+w_S <- readRDS('R_output_files/svm_S_subset.rds') #reference model
+cv_output <- readRDS('R_output_files/cv_output.rds')
+cv_err <- cv_output$cv_report[,'cv.err']
+cv_err_est_S <- min(cv_err)
+(eps_hinge <-  #epsilon on absolute scale =
+	mean(hinge_w(w=w_S,X=X,y=y)) + # in-sample loss of the reference model +
+	cv_err_est_S * eps_multiplier #epsilon on relative scale
+	)
+
+best_cv_ind <- which(cv_err == min(cv_err))
+( reg_threshold <- cv_output$reg_seq[best_cv_ind] )
+
+p1_sets <- readRDS('R_output_files/p1_sets.rds')
+
+
+times_perm <- 1
+set.seed(0)
+system.time({
+	# List of loop-invariant computations for binary search, for each set 
+	# of covariates in which we will calculate MCR.
+	ssts_hinge <- lapply(p1_sets, function(p1){
+		get_suff_stats_linear_hinge(y=y,X=X,p1=p1,times=times_perm+1, reg_matrix=diag(p), start = w_S, reg_threshold=reg_threshold)
+	})
+})
+
+
+g_impute_coeffs <- readRDS('R_output_files/impute_coeffs.rds')
+ssts_impute_hinge <- list()
+system.time({ #loop invariant computations for imputation MCR (similar format as `ssts_hinge`)
+for(j in 1:length(p1_sets)){
+	p1 <- p1_sets[[j]]
+	not_p1 <- setdiff(1:p,p1)
+	X1_impute <- 
+	X1_impute_base <- cbind('(Intercept)'=1,
+		X[,not_p1]) %*% t(g_impute_coeffs[[j]])
+	p1_names <- colnames(X1_impute_base)
+	if(any(p1_names != colnames(X)[p1])) error('naming error')
+
+	race_ind <- grepl('race',p1_names)
+	if(any(race_ind)){
+		rrr <- X1_impute_base[,race_ind]
+		X1_impute[,race_ind] <- exp(rrr)/(1+rowSums(exp(rrr)))
+	}
+	if('c_charge_degree_F' %in% p1_names){
+		X1_impute[,'c_charge_degree_F'] <-
+			exp(X1_impute_base[,'c_charge_degree_F'])/(1+exp(X1_impute_base[,'c_charge_degree_F']))
+	}
+	if('sex_Male' %in% p1_names){
+		X1_impute[,'sex_Male'] <-
+			exp(X1_impute_base[,'sex_Male'])/(1+exp(X1_impute_base[,'sex_Male']))
+	}
+	if('age_over_0' %in% p1_names){
+		age_ind <- grep('age',p1_names)
+		age_info <- readRDS('R_output_files/age_info.rds')
+		
+		X1_impute[,'age_over_0'] <- 
+		age_est <- X1_impute_base[,'age_over_0']
+
+		for(k in 1:length(age_info$knot_points)){
+			aname <- paste0('age_over_', age_info$knot_points[k])
+			knot_k <- age_info$knot_points[k] / age_info$age_sd
+			X1_impute[,aname] <- (age_est - knot_k) * ((age_est - knot_k)>0)
+		}	
+	}
+
+
+	X_resid <- X
+	X_resid[,p1] <-  X[,p1] - X1_impute
+
+	ssts_impute_hinge[[names(p1_sets)[j]]] <- get_suff_stats_linear_hinge(
+		y=y,
+		X=X_resid,
+		p1=p1,
+		times=times_perm+1,
+		reg_matrix=diag(p),
+		start = w_S,
+		reg_threshold=reg_threshold
+	)
+	rm(p1)
+}})
+str(ssts_impute_hinge)
+
+
+	
+system.time({
+	mr_hinge <- lapply(ssts_hinge, function(sst){
+		get_e1_hinge(w=w_S, sst)/get_e0_hinge(w=w_S, sst)
+	})
+})
+(mr_hinge)
+round(get_e0_hinge(w=w_S, ssts_hinge[[1]]),2) #tag-w_S-held-out-Err
+
+
+w_ar <- readRDS('R_output_files/svm_S_AR.rds')
+ar_hinge <- list()
+for(j in 1:length(p1_sets)){
+	ar_hinge[[j]] <- mean(hinge_w(w_ar[[j]], X=X[,-p1_sets[[j]]],y=y)) / 
+		mean(hinge_w(w_S,  X=X,y=y))
+}
+names(ar_hinge) <- names(w_ar)
+str(ar_hinge)
+
+system.time({
+	mcr_hinge <- pblapply(ssts_hinge, function(sst){
+		get_empirical_MCR(
+			eps=eps_hinge,
+			get_h_min=function(...){get_h_min_linear_hinge(upper_method='grad-based-plus-SA',...)},
+			suff_stats=sst,
+			force_lower_0=TRUE)
+	})
+})
+# Note - The setting force_lower_0=TRUE means that we do not search for models with (approximately) MR < 1. 
+# This can trigger a warning of "lower limit reached," 
+# which may indicate that models in the Rashomon set exist with MR < 1.
+lapply(mcr_hinge, function(l) l$range)
+
+
+system.time({
+	mcr_impute_hinge <- pblapply(ssts_impute_hinge, function(sst){
+		get_empirical_MCR(
+			eps=eps_hinge,
+			get_h_min=function(...){get_h_min_linear_hinge(upper_method='grad-based-plus-SA',...)},
+			suff_stats=sst,
+			force_lower_0=TRUE)
+	})
+})
+lapply(mcr_impute_hinge, function(l) l$range)
+
+
+
+
+saveRDS(file='R_output_files/mcr_brief_results.rds',list(
+	mr = mr_hinge,
+	ar = ar_hinge,
+	mcr = mcr_hinge,
+	mcr_impute = mcr_impute_hinge
+	))
+
+save.image('R_output_files/all_output_mcr.rdata')
+
+
+
+
+#### Check tightness & approximation error of search
+# How close is our bound the MR achieved by valid models found during the search:
+str(lapply(mcr_hinge, function(l){
+	lapply(list('minus'='minus','plus'='plus'), function(z) l[[z]]$approximation_error_linear)}))
+str(lapply(mcr_impute_hinge, function(l){
+	lapply(list('minus'='minus','plus'='plus'), function(z) l[[z]]$approximation_error_linear)}))
+# How much tighter could our bound possibly have gotten if we increased the tolerance of our binary search arbitrarily high:
+str(lapply(mcr_hinge, function(l){
+	lapply(list('minus'='minus','plus'='plus'), function(z) l[[z]]$approximation_error_search)}))
+str(lapply(mcr_impute_hinge, function(l){
+	lapply(list('minus'='minus','plus'='plus'), function(z) l[[z]]$approximation_error_search)}))
+
+
+```
+
+
+### Plot results
+
+
+```{r plot_mcr, dev='pdf', fig.height=4, fig.width=9}
+rm(list=ls())
+load('R_output_files/all_output_mcr.rdata')
+
+
+library(reshape2)
+library(ggplot2)
+library(dplyr)
+library(grid)
+library(gridExtra)
+
+
+
+
+
+mcr_gg_names <- list(
+	'variables'=names(p1_sets),
+	'bound'=c('minus','plus')
+	)
+gg_array_impute_mcr <- 
+gg_array_mcr <- array(NA, 
+	dim= unlist(lapply(mcr_gg_names,length)),
+	dimnames = mcr_gg_names
+	)
+for(j in 1:length(names(p1_sets))){
+for(k in 1:2){ #minus/plus
+	gg_array_mcr[j,k] <- max(c(
+		1,
+		mcr_hinge[[j]][[ mcr_gg_names$bound[k] ]]$mcr
+	))
+	gg_array_impute_mcr[j,k] <- max(c(
+		1,
+		mcr_impute_hinge[[j]][[ mcr_gg_names$bound[k] ]]$mcr
+	))
+}}
+
+
+gg_array_mr <- as.matrix(data.frame(hinge=unlist(mr_hinge)))
+gg_array_ar <- as.matrix(data.frame(hinge=unlist(ar_hinge)))
+
+round(gg_array_mr,2) #tag-caption-mr
+round(gg_array_mcr,2) #tag-caption-mcr
+
+ylim_mr <- range(c(gg_array_mr, gg_array_ar, gg_array_mcr, gg_array_impute_mcr)) #Algorithm reliance can be < 1 if reference model out-performs restricted model on held-out data
+
+
+general_gg <-  theme(axis.text.x = element_text(angle = 45, hjust = 1)) + 
+	theme_bw()
+
+gg_plot_mcr <- melt(gg_array_mcr) %>% dcast(variables~ bound) %>%
+	ggplot(., aes(x=as.factor(variables) )) +
+	geom_errorbar(aes(ymax=plus,ymin=minus), position = 'dodge') +
+	ylim(ylim_mr) + 
+	labs(x='Variable Group',y='MCR',title='Empirical model class\nreliance (MCR)') +
+	general_gg
+gg_plot_impute_mcr <- melt(gg_array_impute_mcr) %>% dcast(variables~ bound) %>%
+	ggplot(., aes(x=as.factor(variables) )) +
+	geom_errorbar(aes(ymax=plus,ymin=minus), position = 'dodge') +
+	ylim(ylim_mr) + 
+	labs(x='Variable Group',y='MCR',title='Empirical MCR\nafter imputation') +
+	general_gg
+gg_plot_mr <- melt(gg_array_mr, varnames=c('variables'))%>%
+	ggplot(., aes(x=as.factor(variables))) +
+	geom_point(aes(y=value)) +
+	ylim(ylim_mr) + 
+	labs( x='Variable Group',y='MR',title='Empirical model\nreliance (MR)')+
+	general_gg
+gg_plot_ar <- melt(gg_array_ar, varnames=c('variables'))%>%
+	ggplot(., aes(x=as.factor(variables))) +
+	geom_point(aes(y=value)) +
+	ylim(ylim_mr) + 
+	labs( x='Variable Group',y='AR',title='Empirical algorithm\nreliance (AR)')+
+	general_gg
+
+
+grid.arrange(gg_plot_ar,gg_plot_mr,gg_plot_mcr,gg_plot_impute_mcr,
+	top=textGrob('Empirical AR, MR & MCR for Broward County criminal records dataset',
+		gp = gpar(fontface = "bold", cex = 1.15)),
+	layout_matrix=t(1:4), padding = unit(1, "line"))
+
+
+```
+
