@@ -2,16 +2,16 @@
 
 Code to reproduce results from Section 9.1 & 10 of [Fisher et al., 2019](https://arxiv.org/abs/1801.01489), for calculating model reliance, model class reliance, and other functions for Rashomon sets.
 
-Before running this code, users should install R packages below.
+Before running this code, users should install the R packages below.
 
 ```{r}
 library(devtools)
 
 #For solving (possibly non-convex) quadratic programs with 1 quadratic constraint:
-install_github('aaronjfisher/qp1qc',ref='bd41afc2d7a29a7b602ac1d40c4522335e8455c7')
+install_github('aaronjfisher/qp1qc', ref='bd41afc2d7a29a7b602ac1d40c4522335e8455c7')
 
 #For computing Model Class Reliance:
-install_github('aaronjfisher/mcr',ref='ddff960ac0c17ba96a032003a06ed6f56d676ee9')
+install_github('aaronjfisher/mcr', ref='ddff960ac0c17ba96a032003a06ed6f56d676ee9')
 
 # These references are to the specific commits associated with our final manuscript.
 ```
