@@ -6,12 +6,10 @@ library('ggplot2')
 library('SparseM')
 library('Matrix')
 library('pbapply')
+library('MASS')
 
 
-script_folder <- '../general-scripts/'
-
-source(paste0(script_folder,'binary_search_mcr.r'))
-source(paste0(script_folder,'hinge_mcr.r'))
+library(mcr)
 
 if(!dir.exists('plots')) dir.create('plots')
 
@@ -120,7 +118,7 @@ X_test  <- t(apply(Xy_base_test$X, 1, to_poly_deg))
 y_train <- Xy_base_train$y
 y_test  <- Xy_base_test$y
 (p_poly <- dim(X_train)[2])
-
+reg_matrix <- diag(p_poly)
 
 plot_train_dat <- function(col=c('blue','black')[(y_train==1)+1],...){
 	plot(X_train[,c('x1','x2')],col=col,pch=c(1,4)[(y_train==1)+1],...)
@@ -146,7 +144,7 @@ plot_test_dat <- function(col=c('blue','black')[(y_test==1)+1],...){
 ####################   Cross-validate
 
 # Start by fitting a basic model
-system.time({w_unconstrained <- optimize_hinge_general(y=y_train, X=X_train, reg_threshold=Inf, extra_step_NM=TRUE ,method='grad-based', short_cg_lim =15, long_cg_lim =500)})
+system.time({w_unconstrained <- optimize_hinge_general(y=y_train, X=X_train, reg_threshold=Inf, reg_matrix=reg_matrix, extra_step_NM=TRUE, short_cg_lim =15, long_cg_lim =500)})
 mean(hinge_w(w=w_unconstrained,X=X_train,y=y_train))
 
 J <- 60
@@ -157,8 +155,7 @@ reg_seq <- reg_seq[order(reg_seq)]
 cv_report <- t(pbsapply(reg_seq,function(rr){
 	CV_mod(y=y_train,X=X_train,n_folds=10,
 	fit_fun = function(y,X){optimize_hinge_general(
-		y=y, X=X, reg_threshold=rr, start=w_start_cv,
-		method='grad-based',
+		y=y, X=X, reg_threshold=rr, reg_matrix=reg_matrix,  start=w_start_cv,
 		sparse_warning=FALSE, 
 		extra_step_NM = TRUE,
 		long_cg_lim =500,
@@ -172,7 +169,7 @@ cv_report <- t(pbsapply(reg_seq,function(rr){
 
 (reg_threshold <- reg_seq[which(cv_report[,'cv.err'] == min(cv_report[,'cv.err']))][1])
 
-pdf(paste0('plots/',Sys.Date(),'_10fold_CV_plot.pdf'))
+# pdf(paste0('plots/',Sys.Date(),'_10fold_CV_plot.pdf'))
 	plot(reg_seq,cv_report[,'cv.err'],type='o',col='orange',lwd=2, ylab='Loss', xlab='regularization threshold', main='Cross-validation on training data', ylim=range(cv_report[,c('cv.err','in_sample.err')]))
 	lines(reg_seq,cv_report[,'in_sample.err'],type='o',col='darkgreen',lwd=2)
 	abline(h=min(cv_report[,'cv.err']), lty=3)
@@ -180,10 +177,11 @@ pdf(paste0('plots/',Sys.Date(),'_10fold_CV_plot.pdf'))
 	legend('topright', pch=1, lwd=2, 
 		   c('training loss','CV loss'),
 		col=c('darkgreen','orange'))
-dev.off()
+# dev.off()
 
 # Select a reference model (w_tr)
-w_tr <- optimize_hinge_general(y=y_train, X=X_train, reg_threshold=reg_threshold, extra_step_NM=TRUE)
+w_tr <- optimize_hinge_general(y=y_train, X=X_train, 
+	reg_threshold=reg_threshold, reg_matrix=reg_matrix, extra_step_NM=TRUE)
 crossprod(w_tr[-1])/reg_threshold # workcheck
 crossprod(w_unconstrained[-1])/reg_threshold # workcheck
 
@@ -203,8 +201,10 @@ w_poly_drop1 <- rep(0, 1+p_poly)
 names(w_poly_drop1) <-
 names(w_poly_drop2) <- c('intercept',names(to_poly_deg(Xy_base_train$X[1,])))
 
-w_poly_drop1[c(1,1+noX1)] <- optimize_hinge_general(y=y_train, X=as.matrix(X_train[,noX1]), reg_threshold=reg_threshold)
-w_poly_drop2[c(1,1+noX2)] <- optimize_hinge_general(y=y_train, X=as.matrix(X_train[,noX2]), reg_threshold=reg_threshold)
+w_poly_drop1[c(1,1+noX1)] <- optimize_hinge_general(y=y_train, X=as.matrix(X_train[,noX1]),
+	reg_threshold=reg_threshold, reg_matrix=reg_matrix[noX1,noX1])
+w_poly_drop2[c(1,1+noX2)] <- optimize_hinge_general(y=y_train, X=as.matrix(X_train[,noX2]),
+	reg_threshold=reg_threshold, reg_matrix=reg_matrix[noX2,noX2])
 ####################
 
 
@@ -229,49 +229,57 @@ rm(w_unconstrained, Xy_base_train, X_train, y_train, cv_report)
 
 #### Calculate loop-invariant statistics for MCR binary search.
 # here, `sst` stands for "sufficient statistics"
-sstpoly <- 
-sstpoly_pre <- get_suff_stats_linear_hinge(y=y_test,X=Xy_base_test$X,p1=p1_base,times=2, reg_matrix=diag(p_poly), start = w_start_cv, reg_threshold=reg_threshold)
-sstpoly$full_X <- t(apply(sstpoly_pre$full_X, 1, to_poly_deg))
-str(sstpoly)
+
+to_poly_mat <- function(ZZ){t(apply(ZZ, 1, to_poly_deg))}
 
 
+precomputed <- precompute_mcr_objects_and_functions(
+	y=y_test, X=Xy_base_test$X, p1=p1_base, 
+	model_class_loss = 'linear_hinge',
+	loop_ind_args = list(
+		transform_x = to_poly_deg,
+		reg_matrix = reg_matrix,
+		reg_threshold = reg_threshold
+	))
 
-#### Set the value of eps_abs -- epsilon on the absolute scale rather than the relative scale
+
+#### Set the value of eps -- epsilon on the absolute scale rather than the relative scale
+loss_ref <- mean(hinge_w(y=y_test,X=X_test,w=w_tr)) # E(loss(Ref_model))
 (eps_poly <- 
-	mean(hinge_w(y=y_test,X=X_test,w=w_tr)) + # E(loss(Ref-model))
+	loss_ref + 
 	err_est_w_tr * 0.10) #approx 10% of the expected loss of training model (Ref-model), estimated from training data.
 		#tag-cv-est-eps-10-percent
 		# tag-choice-of-eps
 
 #### Compute MR & MCR
 getMRpolyw <- function(w){
-	get_e1_hinge(w,sstpoly)/get_e0_hinge(w,sstpoly)
+	get_MR_general(model=w, precomputed=precomputed)
 }
 round(getMRpolyw(w_tr),2) #MR of reference model; #tag f-ref-mr
 
 system.time({
 	hinge_poly_mcr <- get_empirical_MCR(
 			eps=eps_poly,
-			get_h_min=function(...){get_h_min_linear_hinge(upper_method='grad-based-plus-SA',...)},
-			suff_stats=sstpoly)
+			precomputed=precomputed,
+			tol=2^-8)
 })
 hinge_poly_mcr$range
-str(lapply(hinge_poly_mcr[-1], function(z) {z$approximation_error_linear})) # tag-approx-sim
-str(lapply(hinge_poly_mcr[-1], function(z) {z$approximation_error_search}))
+str(lapply(hinge_poly_mcr[c('minus','plus')], function(z) {z$approximation_error_linear})) # tag-approx-sim
+str(lapply(hinge_poly_mcr[c('minus','plus')], function(z) {z$approximation_error_search}))
+plot_empirical_MCR_searchpath(hinge_poly_mcr, eps=eps_poly, pch=4, show_all_lines=TRUE)
+points(x=getMRpolyw(w_tr), y= loss_ref, pch=1)
 # str(hinge_poly_mcr) 
+######
 
 
-
-
-
-#        _       _
-#       | |     | |
-#  _ __ | | ___ | |_
-# | '_ \| |/ _ \| __|
-# | |_) | | (_) | |_
-# | .__/|_|\___/ \__|
-# | |
-# |_|
+#   __ _
+#  / _(_)
+# | |_ _  __ _ _   _ _ __ ___  ___
+# |  _| |/ _` | | | | '__/ _ \/ __|
+# | | | | (_| | |_| | | |  __/\__ \
+# |_| |_|\__, |\__,_|_|  \___||___/
+#         __/ |
+#        |___/
 
 
 # Plot the classification boundary associated with a model
@@ -287,19 +295,22 @@ plot.poly.w <- function(w, hull.omit=FALSE, ...){
 }
 
 
-w_best <- optimize_hinge_general(y=y_test, X=X_test, reg_threshold=reg_threshold, extra_step_NM=TRUE)
+w_best <- optimize_hinge_general(y=y_test, X=X_test,
+	reg_threshold=reg_threshold, reg_matrix=reg_matrix, extra_step_NM=TRUE)
 
 # Function to generate a set of models, among which a certain percentage must be well-performing. 
-#based on a matrix of reference points.
+#based on a matrix of reference models (coefficient vectors).
 #' @param eps_R loss threshold on absolute scale.
-generate_R_set <- function(sst, eps_R, w_best, w_ref_mat=NULL, nreps=1000, prop_good=0.8, shrink_factor = 0.2){
+generate_R_set <- function(sst, eps_R, w_best, w_ref_mat=NULL, nreps=1000, prop_good=0.8, shrink_factor = 0.2, reg_threshold, reg_matrix){
 
 	p <- length(w_best)-1
 	is_good <- rbinom(n=nreps,1,p=prop_good) #which models should be well performing (in the Rashomon set)
 	e0_sim <- e1_sim <- rep(NA,nreps)
 	w_mat <- matrix(NA,nreps, p+1)
 
-	if( mean(hinge_w(w_best, X=sst$full_X[!sst$is_perm,], y=sst$full_y[!sst$is_perm])) > eps_R) stop('invalid R set')
+	X_full_poly <- to_poly_mat(sst$full_X)
+
+	if( mean(hinge_w(w_best, X=X_full_poly[!sst$is_perm,], y=sst$full_y[!sst$is_perm])) > eps_R) stop('invalid R set')
 
 	all_references_points <- rbind(w_best,w_ref_mat)
 	picks <- rep(1:dim(all_references_points)[1], length=nreps)
@@ -312,20 +323,22 @@ generate_R_set <- function(sst, eps_R, w_best, w_ref_mat=NULL, nreps=1000, prop_
 		w_sim_j <- w_ref_j + mvrnorm(1,
 			mu=rep(0,p+1),
 			Sigma=diag(var_ref))
-		e0j <-   mean(hinge_w(w_sim_j, X=sst$full_X[!sst$is_perm,], y=sst$full_y[!sst$is_perm]))
+		e0j <-   mean(hinge_w(w_sim_j, X=X_full_poly[!sst$is_perm,], y=sst$full_y[!sst$is_perm]))
 		iter <- 1
 		check_if_too_big <- function(w){
-			c((w[-1] %*% sst$reg_matrix %*% w[-1]) > sst$reg_threshold )
+			c((w[-1] %*% reg_matrix %*% w[-1]) > reg_threshold )
 		}
-		while(( e0j > eps_R | check_if_too_big(w_sim_j)) & iter<1000 & is_good[j]==1){
+		while(( (is_good[j]==1 & e0j > eps_R) | 
+			check_if_too_big(w_sim_j) ) 
+			& iter<1000 ){
 			if(e0j > eps_R) w_sim_j <- shrink_factor * w_best + (1-shrink_factor) * w_sim_j
 			if(check_if_too_big(w_sim_j)) w_sim_j <- 0 + (1-shrink_factor) * w_sim_j
 			iter <- iter+1
-			e0j <-   mean(hinge_w(w_sim_j, X=sst$full_X[!sst$is_perm,], y=sst$full_y[!sst$is_perm]))
+			e0j <-   mean(hinge_w(w_sim_j, X=X_full_poly[!sst$is_perm,], y=sst$full_y[!sst$is_perm]))
 		}
 
 		e0_sim[j] <-e0j
-		e1_sim[j] <- mean(hinge_w(w_sim_j, X=sst$full_X[sst$is_perm,], y=sst$full_y[sst$is_perm]))
+		e1_sim[j] <- mean(hinge_w(w_sim_j, X=X_full_poly[sst$is_perm,], y=sst$full_y[sst$is_perm]))
 		w_mat[j,] <- w_sim_j
 	}
 	if(any(e0_sim[is_good==1] > eps_R)) warning('Less than the requested proportion of models may be well performing.')
@@ -335,18 +348,18 @@ generate_R_set <- function(sst, eps_R, w_best, w_ref_mat=NULL, nreps=1000, prop_
 
 mypal <- brewer.pal(9,'Paired')
 
-pdf(paste0('plots/',Sys.Date(),'_MCR+AR_1panel_example_poly_hinge_',dat_type,'.pdf'),6,6)
+# pdf(paste0('plots/',Sys.Date(),'_MCR+AR_1panel_example_poly_hinge_',dat_type,'.pdf'),6,6)
 {
 	plot_test_dat(col=mypal[c(7,9)][(y_test==1)+1], main=paste0('AR + MCR Example: Polynomial Classifier with\nHinge Loss (',dat_type,')'), xlab='X1', ylab='X2')
 	plot.poly.w(w_tr,lwd=3,lty=3)
-	plot.poly.w(hinge_poly_mcr$minus$full_model$w,lty=2,lwd=2,col=mypal[4])
-	plot.poly.w(hinge_poly_mcr$plus$full_model$w,lty=1,lwd=2,col=mypal[4])
+	plot.poly.w(hinge_poly_mcr$minus$full_model$h_model,lty=2,lwd=2,col=mypal[4])
+	plot.poly.w(hinge_poly_mcr$plus$full_model$h_model,lty=1,lwd=2,col=mypal[4])
 	plot.poly.w(w_poly_drop1,lty=2,lwd=2,col=mypal[2])
 	plot.poly.w(w_poly_drop2,lty=1,lwd=2,col=mypal[2])
 	legend('bottomright',c('AR-','AR+','MCR-','MCR+','ref'), col=c(mypal[c(2,2,4,4)],'black'),lwd=c(2,2,2,2,3), lty=c(2,1,2,1,3),bg='white')
 
 }
-dev.off()
+# dev.off()
 
 pdf(paste0('plots/',Sys.Date(),'_3panel_example_poly_hinge_',dat_type,'.pdf'),height=5,width=10.5,pointsize=14)
 {
@@ -384,7 +397,7 @@ pdf(paste0('plots/',Sys.Date(),'_3panel_example_poly_hinge_',dat_type,'.pdf'),he
 		hinge_poly_mcr$minus$full_model$w,
 		hinge_poly_mcr$plus$full_model$w)
 	set.seed(0) # fix seed now that analysis is done, to keep the same plot contents
-	poly_R_set <- generate_R_set(sstpoly, eps_R=eps_poly, w_ref_mat=w_ref_mat_poly, w_best=w_best, nreps=set_size, prop_good=1, shrink_factor=0.2)
+	poly_R_set <- generate_R_set(precomputed$suff_stats, eps_R=eps_poly, w_ref_mat=w_ref_mat_poly, w_best=w_best, nreps=set_size, prop_good=1, shrink_factor=0.2, reg_matrix=reg_matrix, reg_threshold=reg_threshold)
 
 	plot_test_dat(col=mypal[c(7,9)][(y_test==1)+1], main='', xlab='', ylab='', cex.lab=1.1)
 	mtext(x1exp,1,2.8);mtext(x2exp,2,2)
@@ -393,8 +406,8 @@ pdf(paste0('plots/',Sys.Date(),'_3panel_example_poly_hinge_',dat_type,'.pdf'),he
 	for(j in 1:set_size){
 		plot.poly.w(poly_R_set$w_mat[j,],lty=1,lwd=1,col='lightgray')	
 	}
-	plot.poly.w(hinge_poly_mcr$minus$full_model$w,lty=2,lwd=2,col=mypal[4])
-	plot.poly.w(hinge_poly_mcr$plus$full_model$w,lty=1,lwd=2,col=mypal[4])
+	plot.poly.w(hinge_poly_mcr$minus$full_model$h_model,lty=2,lwd=2,col=mypal[4])
+	plot.poly.w(hinge_poly_mcr$plus$full_model$h_model,lty=1,lwd=2,col=mypal[4])
 	legend('bottomright',c('good',fpe,fme), col=c('darkgray',mypal[c(4,4)]),lwd=c(1,2,2), lty=c(1,1,2),bg='white', cex=1.24, pt.cex=1)
 	####
 
@@ -403,8 +416,8 @@ pdf(paste0('plots/',Sys.Date(),'_3panel_example_poly_hinge_',dat_type,'.pdf'),he
 	goodMR <- apply(poly_R_set$w_mat,1,getMRpolyw)
 	drop2MR <- getMRpolyw(w_poly_drop2)
 	drop1MR <- getMRpolyw(w_poly_drop1)
-	highMR <- getMRpolyw(hinge_poly_mcr$plus$full_model$w)
-	lowMR <- getMRpolyw(hinge_poly_mcr$minus$full_model$w)
+	highMR <- getMRpolyw(hinge_poly_mcr$plus$full_model$h_model)
+	lowMR <- getMRpolyw(hinge_poly_mcr$minus$full_model$h_model)
 	
 	plot(c(), ylim=c(1,0.5*ceiling(max(highMR,drop2MR)*2)),xlim=c(-.07,.9),axes=F,ylab='',xlab='', cex.lab=1.1)
 	mtext('3) Model\nreliance (MR)', cex=1.1, line=0.0,adj=0)
@@ -434,6 +447,7 @@ pdf(paste0('plots/',Sys.Date(),'_3panel_example_poly_hinge_',dat_type,'.pdf'),he
 
 }
 dev.off()
+
 
 
 
