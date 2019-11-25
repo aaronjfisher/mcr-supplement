@@ -19,7 +19,7 @@ install_github('aaronjfisher/mcr', ref='ddff960ac0c17ba96a032003a06ed6f56d676ee9
 After installing the above packages, users can run code from the directories contained here.
 
 * *simulations* - contains code to generate the polynomial classifier example in our paper. Run time ~1-3 minutes.
-* *propublica-analysis* - contains code to generate our applied results. The data file used in this analysis was downloaded from the "compas-scores-two-years.csv" file, at [https://github.com/propublica/compas-analysis](https://github.com/propublica/compas-analysis/tree/bafff5da3f2e45eca6c2d5055faad269defd135a).  Run time ~1-3 hours.
+* *propublica-analysis* - contains code to generate our applied results. The data file used in this analysis was downloaded from the "compas-scores-two-years-violent.csv" file, at [https://github.com/propublica/compas-analysis](https://github.com/propublica/compas-analysis/tree/bafff5da3f2e45eca6c2d5055faad269defd135a).  Run time ~1-3 hours.
 
 
 

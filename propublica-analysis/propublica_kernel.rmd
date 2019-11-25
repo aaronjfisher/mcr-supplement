@@ -1,0 +1,591 @@
+# Reliance of criminal recidivism prediction models on race and sex
+
+### Process data
+
+* Open dataset, 
+* identify data subset (`S_ind`), 
+* create features, and
+* identify sets of variables for which to study reliance (`p1_sets`)
+
+```{r process_data}
+
+library(dplyr)
+multiple_variable_splits <- FALSE
+
+if(!dir.exists('R_output_files')) dir.create('R_output_files')
+
+dat <- read.csv(
+		'compas-scores-two-years-violent.csv') %>%
+		# 'compas-scores-two-years.csv') %>% 
+			#!! ProPublica has published 2 csvs for violent v non violent
+			# although there is not extensive documentation on 
+			# why one sample is smaller
+        filter(days_b_screening_arrest <= 30) %>%
+        filter(days_b_screening_arrest >= -30) %>%
+        filter(is_recid != -1) %>%
+        filter(c_charge_degree != "O") %>%
+        filter(score_text != 'N/A')
+    #filters as suggested for removing poor quality measurements, see below
+        # https://github.com/propublica/compas-analysis/blob/master/Compas%20Analysis.ipynb
+dim(dat)
+
+dat$sex_Male <- dat$sex == 'Male'
+dat$c_charge_degree_F <- dat$c_charge_degree == 'F'
+
+
+
+
+
+colnames(dat)
+apply(dat,2,function(x) mean(is.na(x)))
+
+#Preprocessing
+library(dplyr)
+race_l <- levels(dat$race)
+
+# convert race category to indicator matrix
+race_db <- data.frame(intercept=rep(1,dim(dat)[1]))
+if(sum(dat$race=='Caucasian')==0) stop('Missing intercept / reference group')
+for(j in 1:length(race_l)){
+	if(all( dat$race != race_l[j] )) next
+	if( 'Caucasian' == race_l[j] ) next #Caucasian is intercept / reference group
+	race_db[paste0('race_',race_l[j])] <- (dat$race == race_l[j])+0
+}
+
+
+
+
+
+covariate_subset <- c('sex_Male','priors_count','c_charge_degree_F','age')
+outcomes_lab <- c('v_decile_score')
+
+
+# db_pre = combined processed covariate set we'll be using
+db_pre <- cbind(race_db, dat[,covariate_subset]) %>%
+	lapply(., as.numeric) %>%
+	as.data.frame() %>% as.matrix()
+
+any(is.na(db_pre))
+
+sparse_category_flag <- colSums(db_pre)<400 & apply(db_pre,2,function(z)length(unique(z))<=2)
+	#These sparse category checks are required to avoid CV errors
+if(any(sparse_category_flag)) warning('Some indicators are sparse. Dropping rows with positive indicators for\n',
+	paste(paste(
+		colnames(db_pre)[sparse_category_flag],colSums(as.matrix(db_pre[,sparse_category_flag])),
+	sep=': '),collapse='\n'))
+db_sparse_category <- apply(
+	(db_pre[,sparse_category_flag])==1,
+	1,any)
+db <- db_pre[!db_sparse_category ,!sparse_category_flag]
+saveRDS(sparse_category_flag,'R_output_files/sparse_categories_dropped.rds')
+
+#tag-filter-sparse
+sum(!db_sparse_category)
+!sparse_category_flag
+
+
+set.seed(0)
+S_ind <- (1: nrow(db)) %in% sample(nrow(db),500, replace=FALSE)
+saveRDS(S_ind,'R_output_files/S_ind.rds')
+# head(db[S_ind,])
+
+#tag-num-held-out
+sum(!S_ind)
+
+
+
+# For kernel regression, the intercept is automatically included
+db <- db[,!colnames(db)%in%c('intercept')]
+
+# Scale age & priors based on mean & sd in S_ind.	
+diag(var(db[S_ind,]))
+scale_variables <- c('priors_count','age')
+db[,scale_variables] <- db[,scale_variables] - 
+	rep(1,length(S_ind)) %*% t(colMeans(as.matrix(db[S_ind,scale_variables])))
+db[,scale_variables] <- db[,scale_variables] / 
+	rep(1,length(S_ind)) %*% t(apply(as.matrix(db[S_ind,scale_variables]),2,sd))
+apply(db,2,range)
+diag(var(db[S_ind,]))
+round(colMeans(db[S_ind,]), 6)
+
+
+saveRDS(db,'R_output_files/processed_features_full.rds')
+saveRDS(dat[!db_sparse_category,outcomes_lab],'R_output_files/processed_outcomes_full.rds')
+
+
+#Sets of variables for which to consider model reliance
+admissible <- c('priors_count', 'c_charge_degree_F', 'age')
+if(!multiple_variable_splits) p1_names <- list(
+  'admissible'=admissible,
+  'inadmissible'=setdiff(colnames(db),admissible))
+if(multiple_variable_splits) p1_names <- list(
+	'admissible'=admissible,
+	'inadmissible'=setdiff(colnames(db),admissible),
+	'priors_count'='priors_count',
+	'c_charge_degree_F'='c_charge_degree_F',
+	'age'='age',
+	'sex_Male'='sex_Male',
+	'race_African.American'='race_African.American'
+	)
+(  p1_sets <- lapply(p1_names, function(z) which(colnames(db)%in%z))  )##numeric indeces
+lapply(p1_sets, function(z) colnames(db)[z]) #show variable subsets
+saveRDS(p1_sets,'R_output_files/p1_sets.rds')
+
+save.image('R_output_files/all_output_process.rdata')
+
+
+
+
+```
+
+
+
+### Train 
+
+Train on a data subset to obtain a regularization threshold, a reference model, and models to use in AR.
+
+
+```{r train, dev='pdf'}
+
+
+set.seed(0)
+
+rm(list=ls())
+library(dplyr)
+library(pbapply)
+p1_sets <- readRDS('R_output_files/p1_sets.rds')
+S_ind <- readRDS('R_output_files/S_ind.rds')
+X <- readRDS('R_output_files/processed_features_full.rds')[S_ind,]
+outcomes <- readRDS('R_output_files/processed_outcomes_full.rds')[S_ind]
+colnames(X)
+N<-dim(X)[1]
+
+y <- as.numeric(outcomes)
+
+if(N!=500 | length(y)!=500) stop('error in sampling') #redundant workcheck
+sparse_category_flag <- colSums(X)<5 & apply(X,2,function(z)length(unique(z))<=2)
+if(any(sparse_category_flag)) warning('Some indicators are sparse.\n',
+	paste(paste(
+		colnames(X)[sparse_category_flag],colSums(as.matrix(X[,sparse_category_flag])),
+	sep=': '),collapse='\n'))
+# This would be unexpected since we have already dropped sparse categories above
+
+p <- dim(X)[2]
+
+colMeans(X)
+diag(var(X))
+apply(X,2,range)
+
+
+
+
+
+#   _______      __
+#  / ____\ \    / /
+# | |     \ \  / /
+# | |      \ \/ /
+# | |____   \  /
+#  \_____|   \/
+#
+#   Cross-validate
+
+library(kernlab)
+library(mcr)
+
+# tr denotes "training" data
+mu_tr <- mean(y)
+
+len_s <- 40
+
+sigma_seq <- p^seq(-5,5,length=len_s)
+cv_err_sigma_regression <- rep(NA,len_s)
+pb <- txtProgressBar(min = 1, max = len_s, char = "=", 
+        style = 3)
+for(i in 1:len_s){
+	try({ # may be singular, in which case sigma is too small
+		cv_err_sigma_regression[i] <- CV_kernel(y=y,X=X, type='regression',
+			kern_fun=rbfdot(sigma_seq[i]),
+			dat_ref=NA, n_folds=5, warn_internal=FALSE)
+	})
+	setTxtProgressBar(pb, i)
+}
+plot(y=cv_err_sigma_regression, x=log(sigma_seq))
+sigma_regression <- sigma_seq[which(cv_err_sigma_regression==min(cv_err_sigma_regression, na.rm=TRUE))]
+
+#When bandwidth is too small, some test points may not be close to *any* reference point,
+#which can lead to NaNs and zeros in the kernel regression.
+#This is why some elements of cv_err_sigma_regression are NaN
+
+kern_fun <- rbfdot(sigma_regression)
+
+# Note, some rows of X are identical.
+# These will be automatically dropped from 
+# reference matrices
+mean(duplicated(X))
+
+len_a <- 40
+alpha_seq <- 10^seq(-4,2,length=len_a)
+cv_KLS <- rep(NA,len_a)
+pb <- txtProgressBar(min = 1, max = len_a, char = "=", 
+        style = 3)
+
+for(i in 1:len_a){
+	try({
+		cv_KLS[i] <- CV_kernel(y=y-mu_tr,X=X,alpha=alpha_seq[i], type='RKHS',
+		kern_fun=kern_fun, dat_ref=NA, n_folds=10,
+		warn_internal=FALSE, warn_psd=FALSE, warn_duplicate = FALSE)
+	})
+	setTxtProgressBar(pb, i)
+}
+plot(log(alpha_seq,base=10),cv_KLS, type='l', ylim=c(0,var(y)*2))
+abline(h=var(y),lty=2)
+abline(h=min(cv_KLS, na.rm=TRUE),lty=3, col='blue')
+abline(h=min(cv_err_sigma_regression, na.rm=TRUE),lty=3, col='green')
+
+min_cv_loss <- min(cv_KLS,na.rm=TRUE)
+alpha_cv <- alpha_seq[which(cv_KLS==min_cv_loss)[1]]
+
+
+
+
+K_D <- as.matrix(kernelMatrix(x=X,kernel=kern_fun))
+eK_D <- eigen(K_D)
+tail(cumsum(eK_D$values^2)/sum(eK_D$values^2),20)
+head(cumsum(eK_D$values^2)/sum(eK_D$values^2),20)
+
+###### Train f_s reference model
+X_ref <- X[!duplicated(X),]
+system.time({
+	ssts_tr <- get_suff_stats_kernel( y=y-mu_tr, X=X,kern_fun=kern_fun,dat_ref=X_ref)
+	w_ref <- fit_lm_regularized(suff_stats =ssts_tr, tol = 10^-9, alpha = alpha_cv)
+})
+
+(r_constraint <- norm_RKHS(model=w_ref, K_D=ssts_tr$reg_matrix))
+
+
+
+### Algorithm Reliance - RKHS
+AR_kernel_tr <- lapply(p1_sets, function(p1){
+	#!! For somplicity, no repeating CV here
+	X_drop_p1 <- X[,-p1]
+	X_ref_drop_p1 <- X_drop_p1[!duplicated(X_drop_p1),] #this is now a categorical model
+	ssts_drop_p1_tr <- get_suff_stats_kernel( y=y-mu_tr, X=X_drop_p1,kern_fun=kern_fun,dat_ref=X_ref_drop_p1)
+	w_drop_p1_AR <- fit_lm_regularized(suff_stats =ssts_drop_p1_tr, tol = 10^-9, reg_threshold = r_constraint)
+	return(list(w=w_drop_p1_AR, X_ref=X_ref_drop_p1))
+})
+### Algorithm Reliance - lm
+	# When modelling just race & sex, 
+	# we use a saturated linear model rather than a kernel model.
+X_tr_sex_race_factor <- as.factor(apply(X[,p1_sets$inadmissible], 1, 
+	function(zz) paste(zz,collapse='-')))
+X_tr_sex_race_matrix <- sapply(levels(X_tr_sex_race_factor), function(lvl){
+	as.numeric(X_tr_sex_race_factor==lvl)
+})
+AR_lm_tr_sex_race <- lm(y~.-1, data=data.frame(cbind(y,X_tr_sex_race_matrix)))
+
+
+
+saveRDS(w_ref, 'R_output_files/kern_model_reference.rds')
+saveRDS(kern_fun, 'R_output_files/kern_function_reference.rds')
+saveRDS(r_constraint, 'R_output_files/kern_norm_constraint.rds')
+saveRDS(min_cv_loss, 'R_output_files/min_cv_loss.rds')
+saveRDS(mu_tr,'R_output_files/mu_tr.rds')
+saveRDS(AR_kernel_tr,'R_output_files/AR_kernel_tr.rds')
+saveRDS(AR_lm_tr_sex_race,'R_output_files/AR_lm_tr_sex_race.rds')
+
+
+save.image('R_output_files/all_output_training.rdata')
+
+
+```
+
+
+
+
+### MCR
+
+Get MR, AR & MCR on held-out data
+
+
+
+```{r mcr}
+rm(list=ls())
+set.seed(0) #relevant for bootstrap
+
+library(dplyr)
+library(pbapply)
+S_ind <- readRDS('R_output_files/S_ind.rds')
+X <- readRDS('R_output_files/processed_features_full.rds')[!S_ind,]
+outcomes <- readRDS('R_output_files/processed_outcomes_full.rds')[!S_ind]
+colnames(X)
+N<-dim(X)[1]
+
+y <- as.numeric(outcomes)
+if(any(!unique(y) %in% c(1:10))) stop('processing error')
+p <- dim(X)[2]
+
+if(N!=3373-500 | length(y)!=3373-500) stop('error in sampling')
+
+
+
+
+#  __  __    _____   _____
+# |  \/  |  / ____| |  __ \
+# | \  / | | |      | |__) |
+# | |\/| | | |      |  _  /
+# | |  | | | |____  | | \ \
+# |_|  |_|  \_____| |_|  \_\
+#
+# Model class reliance
+
+library(mcr)
+
+w_ref <- readRDS(file='R_output_files/kern_model_reference.rds')
+kern_fun <- readRDS(file='R_output_files/kern_function_reference.rds')
+r_constraint <- readRDS(file='R_output_files/kern_norm_constraint.rds')
+min_cv_loss <- readRDS('R_output_files/min_cv_loss.rds')
+mu_tr <- readRDS('R_output_files/mu_tr.rds')
+X_ref <- readRDS('R_output_files/processed_features_full.rds')[S_ind,]
+X_ref <- X_ref[!duplicated(X_ref),]
+p1_sets <- readRDS('R_output_files/p1_sets.rds')
+
+
+eps_multiplier <- 0.1
+
+
+
+# te denotes "test" data rather than "train" (tr)
+te_kernel_precomputed <- lapply(p1_sets, function(set){
+	precompute_mcr_objects_and_functions(
+		y=y-mu_tr, X=X,
+		p1=set,
+		model_class_loss='kernel_mse',
+		loop_ind_args = list(
+			reg_threshold=r_constraint,
+			kern_fun = kern_fun,
+			dat_ref=X_ref,
+			nrep_sample=2,
+			tol = 10^-8,
+			verbose=TRUE,
+			warn_psd=TRUE,
+			warn_duplicate = TRUE,
+			warn_dropped = TRUE)
+		)
+})
+
+
+
+MR_ref_te <- lapply(te_kernel_precomputed, function(pc)
+	get_MR_general(model=w_ref,
+		precomputed = pc
+	))
+str(MR_ref_te) #tag-MR-ref-TE
+
+(loss_ref_te <- get_e0_lm(model = w_ref, suff_stats = te_kernel_precomputed[[1]]$suff_stats))
+(eps_ref_te <- c(loss_ref_te + eps_multiplier * min_cv_loss))
+# tag-w_S-held-out-Err
+
+
+
+system.time({
+	mcr_te <- lapply(te_kernel_precomputed, function(pc) 
+		get_empirical_MCR(eps=eps_ref_te, precomputed = pc, tol_mcr=2^-10)
+		)
+})
+
+str(lapply(mcr_te, function(zz) zz$range)) #tag-MCR-TE
+# Note - The setting force_lower_0=TRUE means that we do not search for models with (approximately) MR < 1. 
+# This can trigger a warning of "lower limit reached." 
+
+
+
+n_boot <- 1000
+boot_MCR_results <- lapply(p1_sets, function(p1)
+	data.frame( MCR_minus=rep(NA,n_boot), 
+		MCR_plus=NA, MR=NA))
+pb <- txtProgressBar(min = 1, max = n_boot, char = "=", 
+        style = 3)
+system.time({
+for (b in 1:n_boot){
+	b_ind <- sample(1:N,N,replace=TRUE)
+	X_b <- X[b_ind,]
+	y_b <- y[b_ind] #mu_y_s subtracted later
+
+
+	boot_b_kernel_precomputed <- lapply(p1_sets, function(set){
+		precompute_mcr_objects_and_functions(
+			y=y_b-mu_tr, X=X_b,
+			p1=set,
+			model_class_loss='kernel_mse',
+			loop_ind_args = list(
+				reg_threshold=r_constraint,
+				kern_fun = kern_fun,
+				dat_ref=X_ref,
+				nrep_sample=2,
+				tol = 10^-8,
+				verbose=FALSE,
+				warn_psd=FALSE,
+				warn_duplicate = FALSE,
+				warn_dropped = FALSE)
+			)
+	})	
+
+	loss_ref_b <- get_e0_lm(model = w_ref, suff_stats = boot_b_kernel_precomputed[[1]]$suff_stats)
+	(eps_ref_b <- c(loss_ref_b + eps_multiplier * min_cv_loss))
+	
+	mcr_b <- lapply(boot_b_kernel_precomputed, function(pc) 
+		get_empirical_MCR(eps=eps_ref_b, precomputed = pc, tol_mcr=2^-6, verbose=FALSE, warn_lower_0=FALSE)#!! different tolerance
+		)
+
+	MR_ref_boot <- lapply(boot_b_kernel_precomputed, function(pc)
+		get_MR_general(model=w_ref,
+			precomputed = pc
+	))
+
+	for(nn in names(p1_sets)){
+		boot_MCR_results[[nn]]$MCR_minus[b] <- mcr_b[[nn]]$range[1]
+		boot_MCR_results[[nn]]$MCR_plus[b] <- mcr_b[[nn]]$range[2]
+		boot_MCR_results[[nn]]$MR[b] <- MR_ref_boot[[nn]]
+	}
+
+	if( b%%floor(n_boot/10) ==0) setTxtProgressBar(pb, b)
+}})
+
+par(mfrow=c(1,length(p1_sets)))
+for(j in 1:length(p1_sets)){
+	boxplot(boot_MCR_results[[j]],ylim=range(unlist(boot_MCR_results),na.rm=TRUE), main=names(p1_sets)[j])
+	abline(h=1,lty=3)
+}
+boot_perc_CIs <- lapply(boot_MCR_results, function(pp)
+	lapply(pp, function(qq){
+		quantile(qq,prob=c(0.025, 0.975), na.rm=TRUE)
+	}
+))
+str(boot_perc_CIs)
+
+
+######## !!
+# Interestingly, even if we maximize MR(inadmissible), or minimize out MR(inadmissible), we still get MR(inadmissible) < MR(admissible),
+# although they are closer together.
+# Its not just that you could rely on 
+# either A or B. It's also that models that minimize MR tend to rely
+# less on *either* variable. They tend to be simpler.
+# Here, the reference model can perhaps be a useful baseline for interpreting MCR.
+str(MR_ref_te)
+lapply(te_kernel_precomputed, function(pc)
+	get_MR_general(model=
+		mcr_te$admissible$minus$full_model_output$beta_s_gam,
+		precomputed = pc
+	))
+lapply(te_kernel_precomputed, function(pc)
+	get_MR_general(model=
+		mcr_te$inadmissible$plus$full_model_output$beta_s_gam,
+		precomputed = pc
+	))
+########
+
+
+
+
+
+### Algorithm Reliance - RKHS
+AR_kernel_tr <- readRDS('R_output_files/AR_kernel_tr.rds')
+
+AR_kernel_te_loss <- rep(NA,length(AR_kernel_tr))
+names(AR_kernel_te_loss) <- names(AR_kernel_tr)
+for(j in 1:length(p1_sets)){
+	X_drop_p1j <- X[,-p1_sets[[j]]]
+	AR_j_kernel_precomputed <- precompute_mcr_objects_and_functions(
+			y=y-mu_tr, X=X_drop_p1j, p1 = 1:(dim(X_drop_p1j)[2]),
+			model_class_loss='kernel_mse',
+			loop_ind_args = list(
+				reg_threshold=r_constraint,
+				kern_fun = kern_fun,
+				dat_ref=AR_kernel_tr[[j]]$X_ref,
+				tol = 10^-8,
+				nrep_sample = 2,
+				verbose=FALSE,
+				warn_psd=TRUE,
+				warn_duplicate = TRUE,
+				warn_dropped=TRUE)
+			)
+	AR_kernel_te_loss[j] <- get_e0_lm(model = AR_kernel_tr[[j]]$w, suff_stats = AR_j_kernel_precomputed$suff_stats)
+}
+round(AR_kernel_te_loss/loss_ref_te,2) #tag-AR-TE
+
+### Algorithm Reliance - lm
+AR_lm_tr_sex_race <- readRDS('R_output_files/AR_lm_tr_sex_race.rds')
+X_te_sex_race_factor <- as.factor(apply(X[,p1_sets$inadmissible], 1, 
+	function(zz) paste(zz,collapse='-')))
+X_te_sex_race_matrix <- sapply(levels(X_te_sex_race_factor), function(lvl){
+	as.numeric(X_te_sex_race_factor==lvl)
+})
+pred_lm_tr_sex_race <- X_te_sex_race_matrix %*% AR_lm_tr_sex_race$coef
+AR_lm_tr_sex_race_loss <- mean((y-pred_lm_tr_sex_race)^2)
+AR_lm_tr_sex_race_loss/loss_ref_te
+
+
+saveRDS(file='R_output_files/mcr_brief_results.rds',list(
+	mr = MR_ref_te,
+	mcr = mcr_te
+	))
+
+save.image('R_output_files/all_output_mcr.rdata')
+
+
+
+
+#### Check tightness & approximation error of search
+# How close is our bound the MR achieved by valid models found during the search:
+str(lapply(mcr_te, function(l){
+	lapply(list('minus'='minus','plus'='plus'), function(z) l[[z]]$approximation_error_linear)}))
+
+
+# How much tighter could our bound possibly have gotten if we increased the tolerance of our binary search arbitrarily high:
+str(lapply(mcr_te, function(l){
+	lapply(list('minus'='minus','plus'='plus'), function(z) l[[z]]$approximation_error_search)}))
+
+
+
+```
+
+
+### Plot results
+
+
+```{r plot_mcr, dev='pdf', fig.height=5, fig.width=8}
+rm(list=ls())
+load('R_output_files/all_output_mcr.rdata')
+
+
+########
+# pdf(paste0('figure/',Sys.Date(),'_MR_MCR_propublica.pdf'), width=9,height=5.5, pointsize=14)
+	ylim_ext <- 1.18
+	plot_empirical_MCR_searchpath(mcr_te[[1]], eps=eps_ref_te, 
+		main=paste0('Empirical MR, and empirical MCR for various epsilon levels'),
+		xlim_include=unlist(c(mcr_te[[2]]$range,.5,boot_perc_CIs)),
+		ylim_include=eps_ref_te*ylim_ext,
+		col='blue', pch=4)
+	points(x=c(
+		boot_perc_CIs[[1]]$MCR_minus[1],
+		boot_perc_CIs[[1]]$MCR_plus[2]
+		),y=rep(eps_ref_te,2),pch=c('[',']'),col='blue')
+	plot_empirical_MCR_searchpath(mcr_te[[2]], eps=eps_ref_te,
+		col='gray',show_all_lines=FALSE, pch=4, add_to_plot=TRUE, ylim_include=eps_ref_te*ylim_ext,
+		xlim_include = unlist(c(mcr_te[[1]]$range,.5,boot_perc_CIs)))
+	points(x=c(
+		boot_perc_CIs[[2]]$MCR_minus[1],
+		boot_perc_CIs[[2]]$MCR_plus[2]
+	),y=rep(eps_ref_te,2),pch=c('[',']'),col='gray')
+
+	points(x=c(MR_ref_te), y= rep(loss_ref_te,2), pch=1,col=c('blue','gray'))
+	legend('topright',c('in-MCR','ad-MCR','in-MR','ad-MR'),col=c('gray','blue','gray','blue'),lty=c(1,1,0,0),pch=c(4,4,1,1), bg='white')
+dev.off()
+
+
+
+
+########
+
+```
+
