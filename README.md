@@ -1,6 +1,6 @@
 # MCR
 
-Code to reproduce results from Section 9.1 & 10 of [Fisher et al., 2019](https://arxiv.org/abs/1801.01489){:target="_blank"}, for calculating model reliance, model class reliance, and other functions for Rashomon sets.
+Code to reproduce results from Section 9.1 & 10 of [Fisher et al., 2019](https://arxiv.org/abs/1801.01489), for calculating model reliance, model class reliance, and other functions for Rashomon sets.
 
 Before running this code, users should install R packages below.
 
