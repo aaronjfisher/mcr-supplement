@@ -377,7 +377,7 @@ pdf(paste0('plots/',Sys.Date(),'_3panel_example_poly_hinge_',dat_type,'.pdf'),he
 
 	plot_test_dat(col=mypal[c(7,9)][(y_test==1)+1], main='', xlab='', ylab='', cex.lab=1.1)
 	mtext(x1exp,1,2.8);mtext(x2exp,2,2)
-	mtext(text='1) Algorithm reliance (AR)',cex=1.1, line=1.62,adj=0)
+	mtext(text='A) Algorithm reliance (AR)',cex=1.1, line=1.62,adj=0)
 	plot.poly.w(w_tr,lwd=3,lty=3)
 	plot.poly.w(w_poly_drop1,lty=2,lwd=2,col=mypal[2])
 	plot.poly.w(w_poly_drop2,lty=1,lwd=2,col=mypal[2])
@@ -401,7 +401,7 @@ pdf(paste0('plots/',Sys.Date(),'_3panel_example_poly_hinge_',dat_type,'.pdf'),he
 
 	plot_test_dat(col=mypal[c(7,9)][(y_test==1)+1], main='', xlab='', ylab='', cex.lab=1.1)
 	mtext(x1exp,1,2.8);mtext(x2exp,2,2)
-	mtext(text='2) Model class reliance (MCR)',cex=1.1, line=1.62,adj=0)
+	mtext(text='B) Model class reliance (MCR)',cex=1.1, line=1.62,adj=0)
 	# plot.poly.w(w_tr,lty=1,lwd=2,col='black')
 	for(j in 1:set_size){
 		plot.poly.w(poly_R_set$w_mat[j,],lty=1,lwd=1,col='lightgray')	
@@ -420,7 +420,7 @@ pdf(paste0('plots/',Sys.Date(),'_3panel_example_poly_hinge_',dat_type,'.pdf'),he
 	lowMR <- getMRpolyw(hinge_poly_mcr$minus$full_model$h_model)
 	
 	plot(c(), ylim=c(1,0.5*ceiling(max(highMR,drop2MR)*2)),xlim=c(-.07,.9),axes=F,ylab='',xlab='', cex.lab=1.1)
-	mtext('3) Model\nreliance (MR)', cex=1.1, line=0.0,adj=0)
+	mtext('C) Model\nreliance (MR)', cex=1.1, line=0.0,adj=0)
 	mtext('MR',2,2)
 	axis(2,lwd=2)
 	segments(x0=rep(0,set_size),x1=rep(0.2,set_size),y0=c(goodMR),y1=c(goodMR),col='darkgray')
