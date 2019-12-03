@@ -50,12 +50,6 @@ Source: CRAN
 Version: 1.77
 Hash: 08f1f60e1038957030bcd9f4a58d22d8
 
-Package: askpass
-Source: CRAN
-Version: 1.1
-Hash: 6f6c430e3cd0dd7d48f447700f4d7e7f
-Requires: sys
-
 Package: assertthat
 Source: CRAN
 Version: 0.2.1
@@ -71,26 +65,11 @@ Source: CRAN
 Version: 0.1-3
 Hash: c590d29e555926af053055e23ee79efb
 
-Package: brew
-Source: CRAN
-Version: 1.0-6
-Hash: 931f9972deae0f205e1c78a51f33149b
-
 Package: cli
 Source: CRAN
 Version: 1.1.0
 Hash: bc4e54014c2049f2605ad0c3ba0cce6b
 Requires: assertthat, crayon
-
-Package: clipr
-Source: CRAN
-Version: 0.7.0
-Hash: 30cdec6c8cc62c80c485e6bdd0c02b05
-
-Package: clisymbols
-Source: CRAN
-Version: 1.2.0
-Hash: a76a309884277a4fd8a5d741965fbef5
 
 Package: colorspace
 Source: CRAN
@@ -101,11 +80,6 @@ Package: crayon
 Source: CRAN
 Version: 1.3.4
 Hash: ff2840dd9b0d563fc80377a5a45510cd
-
-Package: curl
-Source: CRAN
-Version: 4.0
-Hash: 43ba5c33f68914a98361fb056d32872d
 
 Package: dfoptim
 Source: CRAN
@@ -332,11 +306,6 @@ Source: CRAN
 Version: 1.4.0
 Hash: 67da32dbb2a7a16f2ef124336358e54a
 Requires: glue, magrittr, stringi
-
-Package: sys
-Source: CRAN
-Version: 3.2
-Hash: aaa3f56d4255306a32ea30df8ef63901
 
 Package: tibble
 Source: CRAN
