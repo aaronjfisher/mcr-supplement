@@ -1,4 +1,4 @@
-# MCR
+# Code Supplement for Model Class Reliance ([Fisher et al., 2019](https://arxiv.org/abs/1801.01489))
 
 Code to reproduce results from Section 9.1 & 10 of [Fisher et al., 2019](https://arxiv.org/abs/1801.01489), for calculating model reliance and model class reliance.
 
