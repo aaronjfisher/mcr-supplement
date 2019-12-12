@@ -2,6 +2,19 @@
 
 Code to reproduce results from Section 9.1 & 10 of [Fisher et al., 2019](https://arxiv.org/abs/1801.01489), for calculating model reliance and model class reliance.
 
+Before describing installation instructions, we include a publication disclaimer.
+
+### Disclaimer
+
+Following the [JMLR release form](http://www.jmlr.org/forms/release.pdf), we make the following disclaimer:
+
+> THIS SOURCE CODE IS SUPPLIED “AS IS” WITHOUT WARRANTY OF ANY KIND, AND ITS AUTHOR AND THE JOURNAL OF MACHINE LEARNING RESEARCH (JMLR) AND JMLR’S PUBLISHERS AND DISTRIBUTORS, DISCLAIM ANY AND ALL WARRANTIES, INCLUDING BUT NOT LIMITED TO ANY IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE, AND ANY WARRANTIES OR NON INFRINGEMENT. THE USER ASSUMES ALL LIABILITY AND RESPONSIBILITY FOR USE OF THIS SOURCE CODE, AND NEITHER THE AUTHOR NOR JMLR, NOR JMLR’S PUBLISHERS AND DISTRIBUTORS, WILL BE LIABLE FOR DAMAGES OF ANY KIND RESULTING FROM ITS USE. Without limiting the generality of the foregoing, neither the author, nor JMLR, nor JMLR’s publishers and distributors, warrant that the Source Code will be error-free, will operate without interruption, or will meet the needs of the user.
+
+We would ask users who encounter difficulties to please contact afishe27@alumni.jh.edu.
+
+### Installation
+
+
 Before running this code, users should install the R packages below.
 
 ```{r}
