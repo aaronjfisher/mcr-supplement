@@ -1,6 +1,6 @@
 # Code Supplement for Model Class Reliance
 
-Code to reproduce results from Section 9.1 & 10 of [Fisher et al., 2019](https://www.jmlr.org/papers/v20/18-760.html), for calculating model reliance and model class reliance.
+Code to reproduce results from Section 9.1 & 10 of [Fisher et al., 2019](http://www.jmlr.org/papers/v20/18-760.html), for calculating model reliance and model class reliance.
 
 Before describing installation instructions, we include a publication disclaimer.
 
